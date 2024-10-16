@@ -23,6 +23,8 @@ pub struct Suppression<'a> {
     pub categories: Vec<(&'a Category, Option<&'a str>)>,
     /// Reason for this suppression comment to exist
     pub reason: &'a str,
+    /// Whether this is a block comment
+    pub is_block_comment: bool,
 }
 
 pub fn parse_suppression_comment(
@@ -96,7 +98,7 @@ pub fn parse_suppression_comment(
         let line = line.trim_start();
 
         Some(
-            parse_suppression_line(line).map_err(|err| SuppressionDiagnostic {
+            parse_suppression_line(line, is_block_comment).map_err(|err| SuppressionDiagnostic {
                 message: err.message,
                 // Adjust the position of the diagnostic in the whole comment
                 span: err.span + offset_from(base, line),
@@ -162,7 +164,10 @@ impl biome_console::fmt::Display for SuppressionDiagnosticKind {
 }
 
 /// Parse the `{ <category> { (<value>) }? }+: <reason>` section of a suppression line
-fn parse_suppression_line(base: &str) -> Result<Suppression, SuppressionDiagnostic> {
+fn parse_suppression_line(
+    base: &str,
+    is_block_comment: bool,
+) -> Result<Suppression, SuppressionDiagnostic> {
     let mut line = base;
     let mut categories = Vec::new();
 
@@ -233,7 +238,11 @@ fn parse_suppression_line(base: &str) -> Result<Suppression, SuppressionDiagnost
     }
 
     let reason = line.trim_end();
-    Ok(Suppression { categories, reason })
+    Ok(Suppression {
+        categories,
+        reason,
+        is_block_comment,
+    })
 }
 
 /// Returns the byte offset of `substr` within `base`
@@ -277,6 +286,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation1",
+                is_block_comment: false
             })],
         );
 
@@ -286,6 +296,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation2",
+                is_block_comment: true
             })],
         );
 
@@ -299,6 +310,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation3",
+                is_block_comment: true
             })],
         );
 
@@ -313,6 +325,8 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation4",
+
+                is_block_comment: true
             })],
         );
     }
@@ -323,6 +337,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None)],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -331,6 +346,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None)],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -339,6 +355,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None)],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
     }
@@ -354,6 +371,7 @@ mod tests {
                     (category!("parse"), Some("dog"))
                 ],
                 reason: "explanation",
+                is_block_comment: false
             })],
         );
 
@@ -366,6 +384,7 @@ mod tests {
                     (category!("parse"), Some("cat"))
                 ],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -382,6 +401,7 @@ mod tests {
                     (category!("parse"), Some("frog"))
                 ],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -399,6 +419,7 @@ mod tests {
                     (category!("parse"), Some("fish"))
                 ],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
     }
@@ -411,6 +432,7 @@ mod tests {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None), (category!("lint"), None)],
                 reason: "explanation",
+                is_block_comment: false
             })],
         );
     }
@@ -489,6 +511,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation1",
+                is_block_comment: false
             })],
         );
 
@@ -498,6 +521,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation2",
+                is_block_comment: true
             })],
         );
 
@@ -511,6 +535,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation3",
+                is_block_comment: true
             })],
         );
 
@@ -525,6 +550,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("parse"), None)],
                 reason: "explanation4",
+                is_block_comment: true
             })],
         );
     }
@@ -535,6 +561,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None)],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -543,6 +570,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None)],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -551,6 +579,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None)],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
     }
@@ -566,6 +595,7 @@ mod tests_biome_ignore {
                     (category!("parse"), Some("dog"))
                 ],
                 reason: "explanation",
+                is_block_comment: false
             })],
         );
 
@@ -578,6 +608,7 @@ mod tests_biome_ignore {
                     (category!("parse"), Some("cat"))
                 ],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -594,6 +625,7 @@ mod tests_biome_ignore {
                     (category!("parse"), Some("frog"))
                 ],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
 
@@ -611,6 +643,7 @@ mod tests_biome_ignore {
                     (category!("parse"), Some("fish"))
                 ],
                 reason: "explanation",
+                is_block_comment: true
             })],
         );
     }
@@ -623,6 +656,7 @@ mod tests_biome_ignore {
             vec![Ok(Suppression {
                 categories: vec![(category!("format"), None), (category!("lint"), None)],
                 reason: "explanation",
+                is_block_comment: false
             })],
         );
     }

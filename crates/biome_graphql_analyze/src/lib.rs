@@ -10,7 +10,8 @@ use biome_analyze::{
     MetadataRegistry, RuleRegistry, SuppressionKind,
 };
 use biome_diagnostics::{category, Error};
-use biome_graphql_syntax::GraphqlLanguage;
+use biome_graphql_syntax::{GraphqlLanguage, TextSize};
+use biome_rowan::TextRange;
 use biome_suppression::{parse_suppression_comment, SuppressionDiagnostic};
 use std::ops::Deref;
 use std::sync::LazyLock;
@@ -57,12 +58,13 @@ where
 {
     fn parse_linter_suppression_comment(
         text: &str,
+        range: TextRange,
     ) -> Vec<Result<SuppressionKind, SuppressionDiagnostic>> {
         let mut result = Vec::new();
 
         for comment in parse_suppression_comment(text) {
-            let categories = match comment {
-                Ok(comment) => comment.categories,
+            let (categories, is_block_comment) = match comment {
+                Ok(comment) => (comment.categories, comment.is_block_comment),
                 Err(err) => {
                     result.push(Err(err));
                     continue;
@@ -71,15 +73,17 @@ where
 
             for (key, value) in categories {
                 if key == category!("lint") {
-                    if let Some(value) = value {
-                        result.push(Ok(SuppressionKind::MaybeLegacy(value)));
-                    } else {
-                        result.push(Ok(SuppressionKind::Everything));
-                    }
+                    result.push(Ok(SuppressionKind::Everything));
                 } else {
                     let category = key.name();
                     if let Some(rule) = category.strip_prefix("lint/") {
-                        result.push(Ok(SuppressionKind::Rule(rule)));
+                        if is_block_comment && range.start() == TextSize::from(0) {
+                            result.push(Ok(SuppressionKind::TopLevel(rule)));
+                        } else if let Some(instance) = value {
+                            result.push(Ok(SuppressionKind::RuleInstance(rule, instance)));
+                        } else {
+                            result.push(Ok(SuppressionKind::Rule(rule)));
+                        }
                     }
                 }
             }

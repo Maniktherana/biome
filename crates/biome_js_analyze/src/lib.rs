@@ -10,6 +10,7 @@ use biome_aria::{AriaProperties, AriaRoles};
 use biome_diagnostics::{category, Error as DiagnosticError};
 use biome_js_syntax::{JsFileSource, JsLanguage};
 use biome_project::PackageJson;
+use biome_rowan::{TextRange, TextSize};
 use biome_suppression::{parse_suppression_comment, SuppressionDiagnostic};
 use std::ops::Deref;
 use std::sync::{Arc, LazyLock};
@@ -59,12 +60,13 @@ where
 {
     fn parse_linter_suppression_comment(
         text: &str,
+        range: TextRange,
     ) -> Vec<Result<SuppressionKind, SuppressionDiagnostic>> {
         let mut result = Vec::new();
 
         for comment in parse_suppression_comment(text) {
-            let categories = match comment {
-                Ok(comment) => comment.categories,
+            let (categories, is_block_comment) = match comment {
+                Ok(comment) => (comment.categories, comment.is_block_comment),
                 Err(err) => {
                     result.push(Err(err));
                     continue;
@@ -73,15 +75,13 @@ where
 
             for (key, value) in categories {
                 if key == category!("lint") {
-                    if let Some(value) = value {
-                        result.push(Ok(SuppressionKind::MaybeLegacy(value)));
-                    } else {
-                        result.push(Ok(SuppressionKind::Everything));
-                    }
+                    result.push(Ok(SuppressionKind::Everything));
                 } else {
                     let category = key.name();
                     if let Some(rule) = category.strip_prefix("lint/") {
-                        if let Some(instance) = value {
+                        if is_block_comment && range.start() == TextSize::from(0) {
+                            result.push(Ok(SuppressionKind::TopLevel(rule)));
+                        } else if let Some(instance) = value {
                             result.push(Ok(SuppressionKind::RuleInstance(rule, instance)));
                         } else {
                             result.push(Ok(SuppressionKind::Rule(rule)));
@@ -160,11 +160,8 @@ where
 #[cfg(test)]
 mod tests {
     use biome_analyze::{AnalyzerOptions, Never, RuleCategoriesBuilder, RuleFilter};
-    use biome_console::fmt::{Formatter, Termcolor};
-    use biome_console::{markup, Markup};
     use biome_diagnostics::category;
-    use biome_diagnostics::termcolor::NoColor;
-    use biome_diagnostics::{Diagnostic, DiagnosticExt, PrintDiagnostic, Severity};
+    use biome_diagnostics::{print_diagnostic_to_string, Diagnostic, DiagnosticExt, Severity};
     use biome_js_parser::{parse, JsParserOptions};
     use biome_js_syntax::{JsFileSource, TextRange, TextSize};
     use biome_project::{Dependencies, PackageJson};
@@ -172,25 +169,25 @@ mod tests {
 
     use crate::{analyze, AnalysisFilter, ControlFlow};
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn quick_test() {
-        fn markup_to_string(markup: Markup) -> String {
-            let mut buffer = Vec::new();
-            let mut write = Termcolor(NoColor::new(&mut buffer));
-            let mut fmt = Formatter::new(&mut write);
-            fmt.write_markup(markup).unwrap();
+        const SOURCE: &str = r#"
 
-            String::from_utf8(buffer).unwrap()
-        }
+        /**
+* biome-ignore lint/style/useConst: reason
+ */
 
-        const SOURCE: &str = r#"import buffer from "buffer"; "#;
+
+let foo = 2;
+let bar = 33;
+        "#;
 
         let parsed = parse(SOURCE, JsFileSource::tsx(), JsParserOptions::default());
 
         let mut error_ranges: Vec<TextRange> = Vec::new();
         let options = AnalyzerOptions::default();
-        let rule_filter = RuleFilter::Rule("style", "useNodejsImportProtocol");
+        let rule_filter = RuleFilter::Rule("style", "useConst");
 
         let mut dependencies = Dependencies::default();
         dependencies.add("buffer", "latest");
@@ -213,9 +210,7 @@ mod tests {
                         .with_severity(Severity::Warning)
                         .with_file_path("dummyFile")
                         .with_file_source_code(SOURCE);
-                    let text = markup_to_string(markup! {
-                        {PrintDiagnostic::verbose(&error)}
-                    });
+                    let text = print_diagnostic_to_string(&error);
                     eprintln!("{text}");
                 }
 
@@ -289,7 +284,6 @@ mod tests {
 
         let mut lint_ranges: Vec<TextRange> = Vec::new();
         let mut parse_ranges: Vec<TextRange> = Vec::new();
-        let mut warn_ranges: Vec<TextRange> = Vec::new();
 
         let options = AnalyzerOptions::default();
         analyze(
@@ -313,10 +307,6 @@ mod tests {
 
                     if code == category!("suppressions/parse") {
                         parse_ranges.push(span.unwrap());
-                    }
-
-                    if code == category!("suppressions/deprecatedSuppressionComment") {
-                        warn_ranges.push(span.unwrap());
                     }
                 }
 
@@ -344,14 +334,6 @@ mod tests {
                 TextRange::new(TextSize::from(1935), TextSize::from(1942)),
             ]
         );
-
-        assert_eq!(
-            warn_ranges.as_slice(),
-            &[
-                TextRange::new(TextSize::from(1193), TextSize::from(1268)),
-                TextRange::new(TextSize::from(1531), TextSize::from(1626)),
-            ]
-        );
     }
 
     #[test]
@@ -359,6 +341,194 @@ mod tests {
         const SOURCE: &str = "
             // biome-ignore lint/suspicious/noDoubleEquals: single rule
             a == b;
+        ";
+
+        let parsed = parse(
+            SOURCE,
+            JsFileSource::js_module(),
+            JsParserOptions::default(),
+        );
+
+        let filter = AnalysisFilter {
+            categories: RuleCategoriesBuilder::default().with_syntax().build(),
+            ..AnalysisFilter::default()
+        };
+
+        let options = AnalyzerOptions::default();
+        analyze(
+            &parsed.tree(),
+            filter,
+            &options,
+            JsFileSource::js_module(),
+            None,
+            |signal| {
+                if let Some(diag) = signal.diagnostic() {
+                    let code = diag.category().unwrap();
+                    if code != category!("suppressions/unused") {
+                        panic!("unexpected diagnostic {code:?}");
+                    }
+                }
+
+                ControlFlow::<Never>::Continue(())
+            },
+        );
+    }
+
+    #[test]
+    fn top_level_suppression_simple() {
+        const SOURCE: &str = "
+/**
+* biome-ignore lint/style/useConst: reason
+*/
+
+
+let foo = 2;
+let bar = 33;
+        ";
+
+        let parsed = parse(
+            SOURCE,
+            JsFileSource::js_module(),
+            JsParserOptions::default(),
+        );
+
+        let filter = AnalysisFilter {
+            categories: RuleCategoriesBuilder::default().with_syntax().build(),
+            ..AnalysisFilter::default()
+        };
+
+        let options = AnalyzerOptions::default();
+        analyze(
+            &parsed.tree(),
+            filter,
+            &options,
+            JsFileSource::js_module(),
+            None,
+            |signal| {
+                if let Some(diag) = signal.diagnostic() {
+                    let error = diag
+                        .with_file_path("dummyFile")
+                        .with_file_source_code(SOURCE);
+                    let text = print_diagnostic_to_string(&error);
+                    eprintln!("{text}");
+                    panic!("Unexpected diagnostic");
+                }
+
+                ControlFlow::<Never>::Continue(())
+            },
+        );
+    }
+
+    #[test]
+    fn top_level_suppression_multiple() {
+        const SOURCE: &str = "
+/**
+* biome-ignore lint/style/useConst: reason
+*/
+
+/**
+* biome-ignore lint/suspicious/noDebugger: reason2
+*/
+
+
+let foo = 2;
+let bar = 33;
+debugger;
+        ";
+
+        let parsed = parse(
+            SOURCE,
+            JsFileSource::js_module(),
+            JsParserOptions::default(),
+        );
+
+        let filter = AnalysisFilter {
+            categories: RuleCategoriesBuilder::default().with_syntax().build(),
+            ..AnalysisFilter::default()
+        };
+
+        let options = AnalyzerOptions::default();
+        analyze(
+            &parsed.tree(),
+            filter,
+            &options,
+            JsFileSource::js_module(),
+            None,
+            |signal| {
+                if let Some(diag) = signal.diagnostic() {
+                    let error = diag
+                        .with_file_path("dummyFile")
+                        .with_file_source_code(SOURCE);
+                    let text = print_diagnostic_to_string(&error);
+                    eprintln!("{text}");
+                    panic!("Unexpected diagnostic");
+                }
+
+                ControlFlow::<Never>::Continue(())
+            },
+        );
+    }
+
+    #[test]
+    fn top_level_suppression_multiple2() {
+        const SOURCE: &str = "
+/**
+* biome-ignore lint/style/useConst: reason
+* biome-ignore lint/suspicious/noDebugger: reason2
+*/
+
+
+let foo = 2;
+let bar = 33;
+debugger;
+        ";
+
+        let parsed = parse(
+            SOURCE,
+            JsFileSource::js_module(),
+            JsParserOptions::default(),
+        );
+
+        let filter = AnalysisFilter {
+            categories: RuleCategoriesBuilder::default().with_syntax().build(),
+            ..AnalysisFilter::default()
+        };
+
+        let options = AnalyzerOptions::default();
+        analyze(
+            &parsed.tree(),
+            filter,
+            &options,
+            JsFileSource::js_module(),
+            None,
+            |signal| {
+                if let Some(diag) = signal.diagnostic() {
+                    let error = diag
+                        .with_file_path("dummyFile")
+                        .with_file_source_code(SOURCE);
+                    let text = print_diagnostic_to_string(&error);
+                    eprintln!("{text}");
+                    panic!("Unexpected diagnostic");
+                }
+
+                ControlFlow::<Never>::Continue(())
+            },
+        );
+    }
+
+    #[test]
+    fn top_level_suppression_with_unused() {
+        const SOURCE: &str = "
+/**
+* biome-ignore lint/style/useConst: reason
+*/
+
+
+let foo = 2;
+/**
+* biome-ignore lint/style/useConst: reason
+*/
+let bar = 33;
         ";
 
         let parsed = parse(
